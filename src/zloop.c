@@ -44,7 +44,7 @@ struct _zloop_t {
     s_poller_t *pollact;        //  Pollers for this poll set
     bool need_rebuild;          //  True if pollset needs rebuilding
     bool verbose;               //  True if verbose tracing wanted
-    bool terminated;            //  True when stopped running
+    int entry_count;            //  Zero when stopped running
     zlistx_t *zombies;          //  List of timers to kill
 };
 
@@ -599,7 +599,7 @@ zloop_timer_end (zloop_t *self, int timer_id)
 {
     assert (self);
 
-    if (self->terminated)
+    if (self->entry_count == 0)
         s_timer_remove (self, timer_id);
     else
     //  We cannot touch self->timers because we may be executing that
@@ -719,6 +719,8 @@ zloop_start (zloop_t *self)
     assert (self);
     int rc = 0;
 
+    self->entry_count++;
+
     //  Main reactor loop
     while (!zsys_interrupted) {
         if (self->need_rebuild) {
@@ -741,15 +743,18 @@ zloop_start (zloop_t *self)
         s_timer_t *timer = (s_timer_t *) zlistx_first (self->timers);
         while (timer) {
             if (time_now >= timer->when) {
+		s_timer_t *retire = NULL;
                 if (self->verbose)
                     zsys_debug ("zloop: call timer handler id=%d", timer->timer_id);
+                if (timer->times && --timer->times == 0) {
+                    zlistx_detach (self->timers, timer->list_handle);
+                    retire = timer;
+                } else
+                    timer->when += timer->delay;
                 rc = timer->handler (self, timer->timer_id, timer->arg);
+		s_timer_destroy	(&retire);
                 if (rc == -1)
                     break;      //  Timer handler signaled break
-                if (timer->times && --timer->times == 0)
-                    zlistx_delete (self->timers, timer->list_handle);
-                else
-                    timer->when += timer->delay;
             }
             timer = (s_timer_t *) zlistx_next (self->timers);
         }
@@ -841,7 +846,7 @@ zloop_start (zloop_t *self)
         if (rc == -1)
             break;
     }
-    self->terminated = true;
+    self->entry_count--;
     return rc;
 }
 
@@ -849,9 +854,12 @@ zloop_start (zloop_t *self)
 //  --------------------------------------------------------------------------
 //  Selftest
 
+static int pings = 0;
+
 static int
 s_cancel_timer_event (zloop_t *loop, int timer_id, void *arg)
 {
+    fprintf (stderr, "%s tid %d\n", __FUNCTION__, timer_id);
     //  We are handling timer 2, and will cancel timer 1
     int cancel_timer_id = *((int *) arg);
     return zloop_timer_end (loop, cancel_timer_id);
@@ -860,13 +868,29 @@ s_cancel_timer_event (zloop_t *loop, int timer_id, void *arg)
 static int
 s_timer_event (zloop_t *loop, int timer_id, void *output)
 {
+    fprintf (stderr, "%s tid %d\n", __FUNCTION__, timer_id);
     zstr_send (output, "PING");
     return 0;
 }
 
 static int
+s_timer_event2 (zloop_t *loop, int timer_id, void *output)
+{
+    zloop_timer (loop, 20, 1, s_timer_event, output);
+    fprintf (stderr, "%s tid %d\n", __FUNCTION__, timer_id);
+    zloop_start (loop);
+    return -1;
+}
+
+static int
 s_socket_event (zloop_t *loop, zsock_t *handle, void *arg)
 {
+    char *s = zstr_recv (handle);
+    assert (s != NULL);
+    fprintf (stderr, "%s: %s\n", __FUNCTION__, s);
+    zstr_free (&s);
+    pings++;
+
     //  Just end the reactor
     return -1;
 }
@@ -903,11 +927,24 @@ zloop_test (bool verbose)
     void *ticket2 = zloop_ticket (loop, s_timer_event, NULL);
     void *ticket3 = zloop_ticket (loop, s_timer_event, NULL);
 
-    //  When we get the ping message, end the reactor
+    //  When we get the first ping message, end the reactor
     rc = zloop_reader (loop, input, s_socket_event, NULL);
     assert (rc == 0);
     zloop_reader_set_tolerant (loop, input);
     zloop_start (loop);
+    assert (pings == 1);
+
+    //  Re-enter the zloop, re-establish ping timer
+    zloop_timer (loop, 20, 1, s_timer_event, output);
+    zloop_start (loop);
+    assert (pings == 2);
+
+    //  Fun with recursion:
+    //  Re-enter the zloop with a timer that will renter the zloop,
+    //  re-establish the ping timer, and exit.
+    zloop_timer (loop, 20, 1, s_timer_event2, output);
+    zloop_start (loop);
+    assert (pings == 3);
 
     zloop_ticket_delete (loop, ticket1);
     zloop_ticket_delete (loop, ticket2);
