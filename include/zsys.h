@@ -207,6 +207,11 @@ CZMQ_EXPORT int
 CZMQ_EXPORT bool
     zsys_has_curve (void);
 
+//  Returns true if the underlying libzmq supports GSSAPI security.
+//  Uses a heuristic probe according to the version of libzmq being used.
+CZMQ_EXPORT bool
+    zsys_has_gssapi (void);
+
 //  Configure the number of I/O threads that ZeroMQ will use. A good
 //  rule of thumb is one thread per gigabit of traffic in or out. The
 //  default is 1, sufficient for most applications. If the environment

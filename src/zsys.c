@@ -1229,6 +1229,38 @@ zsys_has_curve (void)
 
 
 //  --------------------------------------------------------------------------
+//  Returns true if the underlying libzmq supports GSSAPI security.
+//  Uses a heuristic probe according to the version of libzmq being used.
+
+bool
+zsys_has_gssapi (void)
+{
+#if defined (ZMQ_GSSAPI_SERVER)
+#   if defined (ZMQ_HAS_CAPABILITIES)
+    //  This is the most modern way of probing libzmq capabilities
+    return zmq_has ("gssapi") != 0;
+#   else
+    //  However trying the zmq_setsockopt will also work
+    int rc = -1; // assume we fail
+    void *ctx = zmq_ctx_new ();
+    if (ctx) {
+        void *pub = zmq_socket (ctx, ZMQ_PUB);
+        if (pub) {
+            int as_server = 1;
+            rc = zmq_setsockopt (pub, ZMQ_GSSAPI_SERVER, &as_server, sizeof (int));
+            zmq_close (pub);
+        }
+        zmq_term (ctx);
+    }
+    return rc != -1;
+#   endif
+#else
+    return false;
+#endif
+}
+
+
+//  --------------------------------------------------------------------------
 //  Configure the number of I/O threads that ZeroMQ will use. A good
 //  rule of thumb is one thread per gigabit of traffic in or out. The
 //  default is 1, sufficient for most applications. If the environment
